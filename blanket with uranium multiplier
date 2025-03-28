@@ -1,0 +1,511 @@
+import openmc
+import numpy as np
+from openmc_plasma_source import (TokamakSource, plotting as ops_plt)
+import matplotlib.pyplot as plt
+from IPython.display import Image
+openmc.config['cross_sections']='/home/vscode/endfb-viii.0-hdf5/cross_sections.xml'
+#openmc.config['cross_sections']='/home/vscode/thesis/endfb-vii.1-hdf5/cross_sections.xml'
+
+import paramak
+from cadquery import Workplane
+from cad_to_dagmc import CadToDagmc
+my_reactor = paramak.tokamak(
+    radial_build=[
+        (paramak.LayerType.GAP, 10),
+        (paramak.LayerType.SOLID, 30),
+        (paramak.LayerType.SOLID, 50),
+        (paramak.LayerType.SOLID, 10),
+        (paramak.LayerType.SOLID, 120),
+        (paramak.LayerType.SOLID, 20),
+        (paramak.LayerType.GAP, 60),
+        (paramak.LayerType.PLASMA, 300),
+        (paramak.LayerType.GAP, 60),
+        (paramak.LayerType.SOLID, 20),
+        (paramak.LayerType.SOLID, 120),
+        (paramak.LayerType.SOLID, 10),
+    ],
+    vertical_build=[
+        (paramak.LayerType.SOLID, 10),
+        (paramak.LayerType.SOLID, 100),
+        (paramak.LayerType.SOLID, 20),
+        (paramak.LayerType.GAP, 60),
+        (paramak.LayerType.PLASMA, 650),
+        (paramak.LayerType.GAP, 60),
+        (paramak.LayerType.SOLID, 20),
+        (paramak.LayerType.SOLID, 100),
+        (paramak.LayerType.SOLID, 10),
+    ],
+    triangularity=0.55,
+    rotation_angle=180,
+    #extra_cut_shapes=extra_cut_shapes,
+    #extra_intersect_shapes=[divertor_lower]
+)
+
+my_model=CadToDagmc()
+
+material_tags = [
+    "inboard tf coil",
+    "center column shield",
+    "outboard rear blanket",
+    "blanket",
+    #"uranium multiplier",
+    "first wall",
+    #"plasma",
+]
+
+my_reactor = my_reactor.remove(name="plasma")
+my_model.add_cadquery_object(cadquery_object=my_reactor, material_tags=material_tags)
+my_reactor.save(f"my_reactor.stl")
+
+
+mat_plasma = openmc.Material(name="plasma")
+mat_plasma.add_nuclide("H2", 1.0, "ao")
+mat_plasma.add_nuclide("H3",1.0,"ao")
+mat_plasma.set_density("g/cm3", 0.00001)
+mat_center_column_shield = openmc.Material(name="center column shield") #
+mat_center_column_shield.add_element("W", 1, "ao")
+mat_center_column_shield.set_density("g/cm3", 19.3)
+iron=openmc.Material(name='iron')
+iron.add_element('Fe',1.0)
+iron.set_density('g/cc',8.0)
+cr=openmc.Material(name='chromium')
+cr.add_element('Cr',1.0)
+cr.set_density('g/cc',8.0)
+ni=openmc.Material(name='nickel')
+ni.add_element('Ni',1.0)
+ni.set_density('g/cc',8.0)
+mo=openmc.Material(name='molybdenum')
+mo.add_element('Mo',1.0)
+mo.set_density('g/cc',8.0)
+mat_outboard_firstwall = openmc.Material.mix_materials([iron,cr,ni,mo],[0.7,0.16,0.12,0.02],'wo')
+mat_outboard_firstwall.name='first wall'
+lithium_6=openmc.Material(name='lithium 6')
+lithium_6.add_nuclide('Li6',1.0)
+lithium_6.set_density("g/cm3",0.534)
+lithium_7=openmc.Material(name='lithium 7')
+lithium_7.add_nuclide('Li6',1.0)
+lithium_7.set_density("g/cm3",0.534)
+u238=openmc.Material(name="thorium")
+u238.add_nuclide("U238",1.0)
+u238.set_density('g/cc',19.10)
+u235=openmc.Material(name='uranium 233')
+u235.add_nuclide('U235',1.0)
+u235.set_density("g/cc",11.72)
+multiplier=openmc.Material.mix_materials([u235,u238],[0.002,0.998],'ao')
+multiplier.name="uranium multiplier"
+mat_blanket = openmc.Material.mix_materials([lithium_6,lithium_7],[0.1,0.9],'ao')
+mat_blanket.name="blanket"
+mat_outboard_rear_blanket_wall = openmc.Material(name="outboard rear blanket")
+mat_outboard_rear_blanket_wall.add_element("Fe", 1, "ao")
+mat_outboard_rear_blanket_wall.set_density("g/cm3", 7.7)
+mat_inboard_tf_coils =openmc.Material(name='inboard tf coil')
+mat_inboard_tf_coils.add_element('Nb',3.0)
+mat_inboard_tf_coils.add_element('Sn',1.0)
+mat_inboard_tf_coils.set_density('g/cm3',8.74)
+materials = openmc.Materials(
+    [ 
+        mat_center_column_shield,
+        mat_outboard_firstwall,
+        mat_blanket,
+        multiplier,
+        mat_outboard_rear_blanket_wall,
+        mat_inboard_tf_coils,
+    ]
+)
+
+my_model.export_dagmc_h5m_file(min_mesh_size=10.0, max_mesh_size=20.0, filename="dagmc.h5m")
+my_model.export_unstructured_mesh_file(min_mesh_size=10.0, max_mesh_size=20.0, filename="unstructured_mesh.vtk")
+
+dag_univ = openmc.DAGMCUniverse(filename="dagmc.h5m")
+bbox = dag_univ.bounding_box
+dagmc_radius = max(abs(bbox[0][0]), abs(bbox[0][1]), abs(bbox[1][0]), abs(bbox[1][1]))
+
+cylinder_surface = openmc.ZCylinder(r=dagmc_radius, boundary_type="vacuum", surface_id=1000)
+lower_z = openmc.ZPlane(bbox[0][2], boundary_type="vacuum", surface_id=1003)
+upper_z = openmc.ZPlane(bbox[1][2], boundary_type="vacuum", surface_id=1004)
+
+# this is the surface along the side of the 180 degree model
+side_surface = openmc.YPlane(y0=0, boundary_type="reflective", surface_id=1001)
+
+wedge_region = -cylinder_surface & +lower_z & -upper_z & +side_surface
+
+# bounding cell is a wedge shape filled with the DAGMC universe
+bounding_cell = openmc.Cell(fill=dag_univ, cell_id=1000, region=wedge_region)
+
+# bound_dag_univ = dag_univ.bounded_universe()
+geometry = openmc.Geometry([bounding_cell])
+
+
+my_plasma = TokamakSource(
+    elongation=1.557,
+    ion_density_centre=4.46e20,
+    ion_density_pedestal=4.46e20,
+    ion_density_peaking_factor=1,
+    ion_density_separatrix=1.2275e20,
+    ion_temperature_centre=45.9,
+    ion_temperature_pedestal=6.09,
+    ion_temperature_separatrix=0.1,
+    ion_temperature_peaking_factor=8.06,
+    ion_temperature_beta=6,
+    major_radius=450,
+    minor_radius=150,
+    pedestal_radius=0.8 * 150,
+    mode="H",
+    shafranov_factor=0.44789,
+    triangularity=0.550,
+    sample_size=50000,
+)
+plasma = my_plasma.make_openmc_sources()
+
+import matplotlib.pyplot as plt
+import numpy as np
+from openmc_plasma_source import TokamakSource, plotting as ops_plt
+import os
+
+# Set font parameters
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman'] + plt.rcParams['font.serif']
+
+# Create a figure with two subplots
+fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(10, 7))
+
+# Scatter Plot of Neutron Source Density
+ops_plt.scatter_tokamak_source(
+    source=my_plasma, ax=ax1, quantity='neutron_source_density', aspect='equal',
+    alpha=0.5, cmap="plasma", edgecolors="face"
+)
+
+cbar = fig.colorbar(ax1.collections[0], ax=ax1)
+cbar.set_label(r"Neutron source density (neutron/m$^3 \cdot$s)", fontsize=10)
+
+ax1.set_xlabel("R", fontsize=10)
+ax1.set_ylabel("Z", rotation=0, fontsize=10)
+ax1.tick_params(axis='both', which='major', labelsize=10)
+
+# Scatter Plot of Ion Temperature
+ops_plt.scatter_tokamak_source(
+    source=my_plasma, ax=ax2, quantity='ion_temperature', aspect='equal',
+    alpha=0.5, cmap="plasma", edgecolors="face"
+)
+
+cbar = fig.colorbar(ax2.collections[0], ax=ax2)
+cbar.set_label(r"Ion temperature (keV)", fontsize=10)
+
+ax2.set_xlabel("R", fontsize=10)
+ax2.set_ylabel("Z", rotation=0, fontsize=10)
+ax2.tick_params(axis='both', which='major', labelsize=10)
+
+# Adjust layout to prevent overlap and bring plots closer
+plt.subplots_adjust(wspace=0.2)  # Adjust this value to control the space between plots
+
+# Ensure the 'images' folder exists
+os.makedirs("images", exist_ok=True)
+
+# Save the figure 
+plt.savefig("images/source_attributes.png", dpi=300, bbox_inches='tight')
+
+# Show the combined plot
+plt.show()
+
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import numpy as np
+import plasmaboundaries
+import os
+
+# Set the font
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman'] + plt.rcParams['font.serif']
+
+# Plasma parameters
+params = {
+    "aspect_ratio": 0.32,  # a/R_0
+    "A": -0.155,  # A, arbitrary ?
+    "elongation": np.pi/2,  # kappa
+    "triangularity": 0.27,  # delta
+}
+
+# Compute psi
+psi = plasmaboundaries.model.compute_psi(params, config="double-null", return_coeffs=True)
+
+# Grid for plotting
+x = np.arange(0.6, 1.4, 0.01)
+y = np.arange(-0.8, 0.7, 0.01)
+X, Y = np.meshgrid(x, y)
+
+# Compute magnetic flux
+Z = plasmaboundaries.magnetic_flux.psi(X, Y, c_i=psi[1], A=-0.155, config="double-null")
+
+# Create plot
+fig, ax = plt.subplots(figsize=(10, 7))
+
+# Add filled contours
+levels2 = np.unique(np.linspace(Z.min(), -Z.min(), num=100))
+norm = mcolors.TwoSlopeNorm(vmin=Z.min(), vcenter=0., vmax=-Z.min())
+CSF = ax.contourf(X, Y, Z, levels=levels2, cmap="RdYlBu", norm=norm, vmax=-Z.min())
+
+# Add contours
+levels = np.unique(np.append(np.linspace(Z.min(), 0, num=10), np.linspace(0, Z.max(), num=20)))
+CS = ax.contour(X, Y, Z, levels=levels[levels != 0], colors="k", linestyles="solid")
+
+# Separatrix contour
+separatrix = ax.contour(X, Y, Z, levels=[0], colors="k", linestyles="dashed")
+ax.clabel(separatrix, inline=True, fmt=r"$\Psi = $%.0f", fontsize=10)
+
+# Set axis labels
+ax.set_xlabel(r'Radius $\mathrm{R/R_0}$', fontsize=10)
+ax.set_ylabel(r'Height $\mathrm{Z/R_0}$', fontsize=10)
+
+# Set equal aspect ratio
+ax.set_aspect("equal")
+
+# Add colorbar with label
+colorbar = plt.colorbar(CSF, format="%.3f")
+colorbar.set_label(r"Magnetic flux $\Psi$", fontsize=10)
+colorbar.ax.tick_params(labelsize=10)
+
+# Create the 'images' folder if it doesn't exist
+os.makedirs("images", exist_ok=True)
+
+# Save the figure 
+plt.savefig("images/magnetic_flux.png", dpi=300, bbox_inches='tight')
+
+# plt.close(fig)
+
+# Plot the 3D tokamak source with a color map
+# 3D plot
+font_size=10
+fig = plt.figure(figsize=(10, 7))
+ax = fig.add_subplot(111, projection="3d")
+plot = ops_plt.plot_tokamak_source_3D(
+    my_plasma, ax=ax, quantity='neutron_source_density', angles=(0, 2 * np.pi),
+    alpha=0.5, colorbar="plasma"
+)
+fig.savefig("images/plot_tokamak_source_3D_neutron_source_density.png", dpi=300, bbox_inches='tight')
+#Access and normalize the neutron source density
+neutron_density = my_plasma.neutron_source_density
+norm = plt.Normalize(vmin=neutron_density.min(), vmax=neutron_density.max())
+
+# Add the colorbar
+cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap="plasma"), ax=ax, pad=0.05)
+cbar.set_label(r"Neutron source density (neutron/m$^3 \cdot$s)", fontsize=font_size)
+
+# Set axis labels
+ax.set_xlabel("R", fontsize=font_size)
+ax.set_ylabel("Z", fontsize=font_size)
+ax.set_zlabel("Density", fontsize=font_size)
+
+# Set tick labels font size
+plt.setp(ax.get_xticklabels(), fontsize=font_size)
+plt.setp(ax.get_yticklabels(), fontsize=font_size)
+plt.setp(ax.get_zticklabels(), fontsize=font_size)
+
+# Set font size for colorbar
+cbar.ax.yaxis.label.set_size(font_size)
+plt.setp(cbar.ax.get_yticklabels(), fontsize=font_size)
+
+# Save the 3D plot 
+fig.savefig("images/plot_tokamak_source_3D_neutron_source_density.png", dpi=300, bbox_inches='tight')
+# plt.close(fig)
+
+
+settings=openmc.Settings()
+settings.run_mode="fixed source"
+settings.batches=10
+settings.particles=5000
+settings.source=plasma
+#settings.source=plasma
+
+from openmc_source_plotter import plot_source_position
+
+plot = plot_source_position(this=settings, n_samples=50000)
+
+plot.show()
+
+mesh = openmc.UnstructuredMesh(filename="unstructured_mesh.vtk", library="moab", mesh_id=1)
+mesh_filter=openmc.MeshFilter(mesh)
+mat_filter=openmc.MaterialFilter([mat_blanket])
+
+heating_tally = openmc.Tally(name="heating")
+heating_tally.scores = ["heating"]
+heating_tally.filters=[openmc.MeshFilter(mesh)]
+
+
+# adds a tally to record the total TBR
+tbr_tally = openmc.Tally(name="tbr")
+tbr_tally.scores = ["(n,Xt)"]
+tbr_tally.nuclides=['Li6','Li7']
+tbr_tally.filters=[mesh_filter,mat_filter]
+# makes a mesh tally using the previously created mesh and records heating on the mesh
+energies = np.logspace(np.log10(1e-5), np.log10(20.0e6), 1001)
+e_filter = openmc.EnergyFilter(energies)
+
+# makes a mesh tally using the previously created mesh and records TBR on the mesh
+flux_tally = openmc.Tally(name="flux")
+flux_tally.filters = [openmc.MeshFilter(mesh)]
+flux_tally.scores = ["flux"]
+
+flux_tally1 = openmc.Tally(name="energy dependent flux")
+flux_tally1.filters = [e_filter]
+flux_tally1.scores = ["flux"]
+
+absorption_tally=openmc.Tally(name='absorption')
+absorption_tally.filters=[openmc.MeshFilter(mesh)]
+absorption_tally.scores=['absorption']
+
+damage_energy = openmc.Tally(name='neutron damage energy')
+damage_energy.filters = [openmc.MeshFilter(mesh)]
+damage_energy.scores = ['damage-energy']
+# groups the two tallies
+tallies = openmc.Tallies([tbr_tally, heating_tally, flux_tally,absorption_tally,damage_energy,flux_tally1])
+
+# builds the openmc model
+my_model = openmc.Model(
+    materials=materials, geometry=geometry, settings=settings, tallies=tallies
+)
+
+# starts the simulation
+my_model.run()
+
+import openmc
+sp = openmc.StatePoint("statepoint.10.h5")
+
+for tally_id, tally in sp.tallies.items():
+    print(f"Tally ID: {tally_id}, Tally Name: {tally.name}")
+
+
+
+# Get the heating tally
+heating_tally = sp.get_tally(name="heating")
+print(heating_tally)
+
+
+# Get heating slice
+heating = heating_tally.get_slice(scores=['heating'])
+heating_umesh = heating.find_filter(openmc.MeshFilter).mesh
+print(f"The reactor has {heating.mean.sum()/1e6} MeV/source particle deposited")
+print(f"Standard deviation on the heating is {heating.std_dev.sum()/1e6}")
+
+
+heating_filter = heating.find_filter(openmc.MeshFilter)
+heating_mesh = heating_filter.mesh
+
+
+centroids = heating_mesh.centroids  # not needed in the next release of openmc
+mesh_vols = heating_mesh.volumes  # not needed in the next release of openmc
+
+heating_mesh.write_data_to_vtk(
+    datasets={"mean": heating.mean.flatten()},
+    filename="heating results.vtk",
+)
+heating_mesh.write_data_to_vtk(
+    datasets={"std_dev": heating.std_dev.flatten()},
+    filename="heating std dev results.vtk",
+)
+
+# extracts the mesh tally result
+absorption_tally = sp.get_tally(name="absorption")
+print(absorption_tally)
+
+
+
+absorption=absorption_tally.get_slice(scores=['absorption'])
+absorption_umesh = absorption.find_filter(openmc.MeshFilter).mesh
+print(absorption.shape)
+print(f"The reactor has a absorption rate of {absorption.mean.sum()}")
+print(f"Standard deviation on the absorption is {absorption.std_dev.sum()}")
+centroids = absorption_umesh.centroids  # not needed in the next release of openmc
+mesh_vols = absorption_umesh.volumes  # not needed in the next release of openmc
+
+
+absorption_umesh.write_data_to_vtk(
+    datasets={"mean":absorption_tally.mean.flatten()},
+    filename="absorption results.vtk",
+)
+absorption_umesh.write_data_to_vtk(
+    datasets={"std_dev": absorption_tally.std_dev.flatten()},
+    filename="absorption std dev results.vtk",
+)
+
+
+# extracts the mesh tally result
+tbr_tally = sp.get_tally(name="tbr")
+print(tbr_tally.shape)
+
+tbr=tbr_tally.get_slice(scores=["(n,Xt)"])
+#tbr_umesh = tbr.find_filter(openmc.MaterialFilter)
+print(f"The reactor has a TBR of {tbr.mean.sum()}")
+print(f"Standard deviation on the TBR is {tbr.std_dev.sum()}")
+
+
+# extracts the mesh tally result
+power=1e9 #1000 MW plant
+neutron_energy=14e6*1.6e-19
+source_rate=power/neutron_energy
+print(source_rate)
+
+flux=sp.get_tally(name='flux')
+print(flux.shape)
+flux_umesh=flux.find_filter(openmc.MeshFilter).mesh
+centroids = flux_umesh.centroids  # not needed in the next release of openmc
+mesh_vols = flux_umesh.volumes  # not needed in the next release of openmc
+
+print(flux.mean.sum())
+print(flux.std_dev.sum())
+
+print(flux.mean.sum()*source_rate),
+print(flux.std_dev.sum()*source_rate)
+
+
+flux_umesh.write_data_to_vtk(
+    datasets={"mean": flux.mean.flatten()},
+    filename="flux_results.vtk",
+)
+flux_umesh.write_data_to_vtk(
+    datasets={"std_dev": flux.std_dev.flatten()},
+    filename="flux_std_dev_results.vtk",
+)
+
+flux1=sp.get_tally(name='energy dependent flux')
+print(flux1.shape)
+energy=np.logspace(np.log10(1e-5), np.log10(20.0e6), 1000)
+print(energy.shape)
+flux2 = flux1.mean.flatten()
+print("Energy shape:", np.shape(energy))
+print("Flux2 shape:", np.shape(flux2))
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.plot(energy,flux2, label='Total Neutron Flux')
+#plt.xlim(1e6,1.5e7)
+plt.xscale('linear')
+plt.yscale('linear')
+plt.xlabel('Energy (eV)')
+plt.ylabel('Flux (neutrons/cm²-sec)')
+plt.title('Flux vs. Energy')
+plt.grid(True)
+plt.show()
+
+# extracts the mesh tally result
+damage_energy_tally = sp.get_tally(name="neutron damage energy")
+print(damage_energy_tally)
+
+E_damage=damage_energy_tally.get_slice(scores=["damage-energy"])
+e_umesh=E_damage.find_filter(openmc.MeshFilter).mesh
+E_damage.mean.shape
+E=E_damage.mean.flatten()
+E.shape
+
+
+e_umesh.write_data_to_vtk(
+    datasets={"mean": E_damage.mean.flatten()},
+    filename="damage energy_results.vtk",
+)
+e_umesh.write_data_to_vtk(
+    datasets={"std_dev": E_damage.std_dev.flatten()},
+    filename="damage energy_std_dev_results.vtk",
+)
+
+print(E_damage.mean.sum()/1e6,'MeV')
+print(E_damage.std_dev.sum()/1e6,"MeV")
